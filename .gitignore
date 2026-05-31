@@ -55,3 +55,5 @@ Makefile
 # ESP-IDF specific
 sdkconfig.old
 sdkconfig
+AGENTS.md
+.env

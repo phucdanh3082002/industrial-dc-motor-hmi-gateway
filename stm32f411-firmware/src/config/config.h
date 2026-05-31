@@ -62,4 +62,32 @@ extern TIM_HandleTypeDef htim1;
 #define INA219_TIMEOUT_MS   50U
 #define BMP280_TIMEOUT_MS   100U
 
+// ============================================================================
+// Motor Control Thresholds (Phase 2)
+// ============================================================================
+#define MOTOR_TEMP_WARN_C10     450U        // 45.0°C warning (°C × 10)
+#define MOTOR_TEMP_FAULT_C10    650U        // 65.0°C fault (°C × 10)
+#define MOTOR_TEMP_HYSTERESIS   50U         // 5.0°C hysteresis
+#define MOTOR_CURRENT_ALARM_MA  1000        // 1.0A alarm
+#define MOTOR_CURRENT_FAULT_MA  2000        // 2.0A fault
+
+// ============================================================================
+// Auto Mode PWM Thresholds (°C × 10)
+// ============================================================================
+#define MOTOR_AUTO_TEMP_LOW     350U        // < 35°C: PWM = 0%
+#define MOTOR_AUTO_TEMP_MED1    450U        // 35-45°C: PWM = 40%
+#define MOTOR_AUTO_TEMP_MED2    550U        // 45-55°C: PWM = 70%
+#define MOTOR_AUTO_TEMP_HIGH    650U        // 55-65°C: PWM = 100%
+
+// ============================================================================
+// Modbus Slave ID
+// ============================================================================
+#define MODBUS_SLAVE_ID         1U
+
+// ============================================================================
+// Watchdog Configuration
+// ============================================================================
+#define IWDG_TIMEOUT_MS         2000U       // 2 second watchdog timeout
+#define IWDG_FEED_INTERVAL_MS   1000U       // Feed every 1 second
+
 #endif // CONFIG_H

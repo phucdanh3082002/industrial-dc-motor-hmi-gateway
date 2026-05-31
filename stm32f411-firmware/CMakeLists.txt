@@ -56,6 +56,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     src/sensors/lm35_test.c
     src/sensors/ina219_test.c
     src/sensors/bmp280_test.c
+
+    # Motor control & fault management (Phase 2)
+    src/motor/motor_control.c
+    src/fault/fault_manager.c
 )
 
 # ============================================================================

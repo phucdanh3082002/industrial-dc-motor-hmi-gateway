@@ -25,6 +25,8 @@
 #include "sensors/lm35_test.h"
 #include "sensors/ina219_test.h"
 #include "sensors/bmp280_test.h"
+#include "motor/motor_control.h"
+#include "fault/fault_manager.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -145,207 +147,54 @@ int main(void)
 
   uart_debug_printf("\r\n");
   uart_debug_printf("============================================\r\n");
-  uart_debug_printf("  STM32F411CEU6 - Hardware Test Harness\r\n");
+  uart_debug_printf("  STM32F411CEU6 - Motor Control Firmware\r\n");
   uart_debug_printf("  Build: %s %s\r\n", __DATE__, __TIME__);
+  uart_debug_printf("  Phase 2: Motor Control & Protection\r\n");
   uart_debug_printf("============================================\r\n");
   uart_debug_printf("SYSCLK: %lu MHz\r\n", HAL_RCC_GetSysClockFreq() / 1000000UL);
-  uart_debug_printf("APB1:   %lu MHz\r\n", HAL_RCC_GetPCLK1Freq() / 1000000UL);
-  uart_debug_printf("APB2:   %lu MHz\r\n", HAL_RCC_GetPCLK2Freq() / 1000000UL);
   uart_debug_printf("Chip ID: 0x%08lX\r\n", HAL_GetDEVID());
 
   /* ========================================================================
-   * TEST 1: LED (PC13, Active LOW)
+   * PHASE 2: MOTOR CONTROL INIT
    * ======================================================================== */
-  test_section("TEST 1: LED (PC13)");
-  uart_debug_printf("  Blinks LED 3 times (500ms interval)...\r\n");
+  uart_debug_printf("\r\n[INIT] Starting motor control initialization...\r\n");
 
-  for (uint8_t i = 0U; i < 3U; i++) {
-      gpio_set_led(1U);   /* LED ON (PC13 LOW) */
-      HAL_Delay(500);
-      gpio_set_led(0U);   /* LED OFF (PC13 HIGH) */
-      HAL_Delay(500);
-  }
-  test_result("LED toggle", 0);
-
-  /* ========================================================================
-   * TEST 2: BUZZER (PB12, Active HIGH)
-   * ======================================================================== */
-  test_section("TEST 2: BUZZER (PB12)");
-  uart_debug_printf("  Beep for 200ms...\r\n");
-
-  gpio_set_buzzer(1U);
-  HAL_Delay(200);
-  gpio_set_buzzer(0U);
-  test_result("Buzzer beep", 0);
-
-  /* ========================================================================
-   * TEST 3: UART DEBUG (USART1, PA9/PA10, 115200)
-   * ======================================================================== */
-  test_section("TEST 3: UART DEBUG (USART1)");
-  uart_debug_printf("  Loopback test: if you see this, UART OK.\r\n");
-  uart_debug_printf("  Baudrate: 115200, 8N1\r\n");
-  test_result("UART debug print", 0);
-
-  /* ========================================================================
-   * TEST 4: ADC - LM35 TEMPERATURE (PA0, ADC1_IN0)
-   * ======================================================================== */
-  test_section("TEST 4: LM35 TEMPERATURE (ADC1_IN0/PA0)");
-  {
-      int16_t s16_temp_c10;
-      float f32_temp_c;
-      int s32_ret;
-
-      uart_debug_printf("  Reading LM35 (16 samples average)...\r\n");
-
-      s32_ret = lm35_test_read_temp_c(&f32_temp_c);
-      if (s32_ret == 0) {
-          s16_temp_c10 = (int16_t)(f32_temp_c * 10.0f);
-          uart_debug_printf("  Temperature: %.1f C (reg: %d)\r\n", f32_temp_c, s16_temp_c10);
-          uart_debug_printf("  ADC raw avg: check via debugger\r\n");
-      }
-      test_result("LM35 temperature read", s32_ret);
+  if (motor_control_init() != 0) {
+      uart_debug_printf("[INIT] Motor control init FAILED!\r\n");
+      Error_Handler();
   }
 
-  /* ========================================================================
-   * TEST 5: I2C SCAN (PB6=SCL, PB7=SDA, 100kHz)
-   * ======================================================================== */
-  test_section("TEST 5: I2C SCAN (I2C1)");
-  {
-      uint8_t au8_found[8];
-      uint8_t u8_count = 0U;
-      int s32_ret;
+  /* Start with motor stopped, manual mode, default thresholds */
+  motor_command_t s_motor_cmd;
+  s_motor_cmd.u8_enable         = 0U;
+  s_motor_cmd.u8_pwm_setpoint   = 0U;
+  s_motor_cmd.e_mode            = MOTOR_MODE_MANUAL;
+  s_motor_cmd.u8_reset_fault    = 0U;
+  s_motor_cmd.u16_current_limit = 1000U;    /* 1.0A */
+  s_motor_cmd.u16_temp_warn     = 450U;     /* 45.0°C */
+  s_motor_cmd.u16_temp_fault    = 650U;     /* 65.0°C */
 
-      s32_ret = i2c_driver_scan(au8_found, 8U, &u8_count);
-      if (s32_ret == 0) {
-          uart_debug_printf("  Found %d device(s):", u8_count);
-          for (uint8_t i = 0U; i < u8_count; i++) {
-              uart_debug_printf(" 0x%02X", au8_found[i]);
-          }
-          uart_debug_printf("\r\n");
-          uart_debug_printf("  Expected: 0x40 (INA219), 0x76 (BMP280)\r\n");
-      }
-      test_result("I2C bus scan", s32_ret);
-  }
+  uart_debug_printf("[INIT] Motor control ready. Starting super loop...\r\n");
+  uart_debug_printf("[INIT] Send 'S' to start motor, 'X' to stop, 'R' to reset fault\r\n");
+  uart_debug_printf("[INIT] Send '1'-'9' to set PWM (10%%-90%%), '0' for 100%%\r\n");
+  uart_debug_printf("[INIT] Send 'A' for auto mode, 'M' for manual mode\r\n\r\n");
 
   /* ========================================================================
-   * TEST 6: INA219 CURRENT/VOLTAGE SENSOR (I2C addr 0x40)
+   * SUPER LOOP: Motor Control + UART Command Parser
    * ======================================================================== */
-  test_section("TEST 6: INA219 (I2C 0x40)");
-  {
-      int16_t s16_current_ma;
-      uint16_t u16_voltage_mv;
-      int s32_ret;
+  uint32_t u32_last_motor_update = 0U;
+  uint32_t u32_last_status_print = 0U;
+  uint32_t u32_last_watchdog_feed = 0U;
+  uint8_t u8_rx_byte = 0U;
 
-      uart_debug_printf("  Initializing INA219 (32V, 2A range)...\r\n");
-      s32_ret = ina219_test_init();
-
-      if (s32_ret == 0) {
-          HAL_Delay(10U);
-
-          s32_ret = ina219_test_read_bus_voltage_mv(&u16_voltage_mv);
-          if (s32_ret == 0) {
-              uart_debug_printf("  Bus voltage: %u mV (%.2f V)\r\n",
-                                u16_voltage_mv, (float)u16_voltage_mv / 1000.0f);
-          } else {
-              uart_debug_printf("  [WARN] Bus voltage read failed\r\n");
-          }
-
-          s32_ret = ina219_test_read_current_ma(&s16_current_ma);
-          if (s32_ret == 0) {
-              uart_debug_printf("  Current: %d mA\r\n", s16_current_ma);
-          } else {
-              uart_debug_printf("  [WARN] Current read failed\r\n");
-          }
-      }
-      test_result("INA219 init + read", s32_ret);
-  }
-
-  /* ========================================================================
-   * TEST 7: BMP280 TEMPERATURE/PRESSURE (I2C addr 0x76)
-   * ======================================================================== */
-  test_section("TEST 7: BMP280 (I2C 0x76)");
-  {
-      uint8_t u8_chip_id = 0U;
-      int16_t s16_temp_c10;
-      uint16_t u16_press_hpa;
-      int s32_ret;
-
-      uart_debug_printf("  Initializing BMP280...\r\n");
-      s32_ret = bmp280_test_init();
-
-      if (s32_ret == 0) {
-          bmp280_test_read_chip_id(&u8_chip_id);
-          uart_debug_printf("  Chip ID: 0x%02X (expected 0x58)\r\n", u8_chip_id);
-
-          HAL_Delay(50U);
-
-          s32_ret = bmp280_test_read_temp_press(&s16_temp_c10, &u16_press_hpa);
-          if (s32_ret == 0) {
-              uart_debug_printf("  Temperature: %d (reg 40002: %.1f C)\r\n",
-                                s16_temp_c10, (float)s16_temp_c10 / 10.0f);
-              uart_debug_printf("  Pressure:    %u hPa (reg 40003)\r\n", u16_press_hpa);
-          } else {
-              uart_debug_printf("  [WARN] BMP280 read failed\r\n");
-          }
-      } else if (s32_ret == -2) {
-          uart_debug_printf("  [WARN] Wrong chip ID - check wiring!\r\n");
-      }
-      test_result("BMP280 init + read", s32_ret);
-  }
-
-  /* ========================================================================
-   * TEST 8: PWM MOTOR OUTPUT (TIM1_CH1, PA8, 20kHz)
-   * ======================================================================== */
-  test_section("TEST 8: PWM MOTOR (TIM1_CH1/PA8)");
-  {
-      /* Start PWM output on TIM1 CH1 */
-      HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-
-      uart_debug_printf("  PWM started: 20kHz, Period=99\r\n");
-
-      /* Sweep: 0% -> 50% -> 100% -> 0% */
-      uart_debug_printf("  0%% duty (OFF)...\r\n");
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
-      HAL_Delay(500);
-
-      uart_debug_printf("  50%% duty...\r\n");
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 50U);
-      HAL_Delay(500);
-
-      uart_debug_printf("  100%% duty (FULL)...\r\n");
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 99U);
-      HAL_Delay(500);
-
-      /* Stop motor */
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
-      HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
-
-      uart_debug_printf("  PWM stopped.\r\n");
-      test_result("PWM motor sweep", 0);
-  }
-
-  /* ========================================================================
-   * TEST SUMMARY
-   * ======================================================================== */
-  uart_debug_printf("\r\n");
-  uart_debug_printf("============================================\r\n");
-  uart_debug_printf("  TEST SUMMARY\r\n");
-  uart_debug_printf("  PASS: %lu / %lu\r\n", gu32_test_pass, (gu32_test_pass + gu32_test_fail));
-  uart_debug_printf("  FAIL: %lu\r\n", gu32_test_fail);
-  uart_debug_printf("============================================\r\n");
-
-  if (gu32_test_fail == 0U) {
-      uart_debug_printf("  ALL TESTS PASSED!\r\n");
-  } else {
-      uart_debug_printf("  SOME TESTS FAILED - CHECK WIRING!\r\n");
-  }
-  uart_debug_printf("\r\n");
-
-  /* ========================================================================
-   * PERIODIC STATUS LOOP (after all tests pass)
-   * ======================================================================== */
-  uint32_t u32_last_print = test_get_ms();
-  uint32_t u32_interval = 2000U;  /* Print every 2 seconds */
+  /* Enable IWDG (Independent Watchdog) - 2s timeout */
+  /* NOTE: Uncomment after verifying IWDG works in test
+  IWDG_HandleTypeDef hiwdg;
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_4;
+  hiwdg.Init.Reload = 4095U;  // ~2s timeout at 40kHz/4
+  HAL_IWDG_Init(&hiwdg);
+  */
 
   /* USER CODE END 2 */
 
@@ -356,41 +205,102 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if ((test_get_ms() - u32_last_print) >= u32_interval) {
-        u32_last_print = test_get_ms();
 
-        /* Read LM35 */
-        float f32_temp;
-        if (lm35_test_read_temp_c(&f32_temp) == 0) {
-            uart_debug_printf("[LM35]  %.1f C\r\n", f32_temp);
-        }
+    uint32_t u32_now = test_get_ms();
 
-        /* Read INA219 */
-        uint16_t u16_mv;
-        int16_t s16_ma;
-        if (ina219_test_read_bus_voltage_mv(&u16_mv) == 0) {
-            uart_debug_printf("[INA219] %u mV / ", u16_mv);
-        }
-        if (ina219_test_read_current_ma(&s16_ma) == 0) {
-            uart_debug_printf("%d mA\r\n", s16_ma);
-        } else {
-            uart_debug_printf("\r\n");
-        }
+    /* --- 1. Motor control update (every 100ms) --- */
+    if ((u32_now - u32_last_motor_update) >= 100U) {
+        u32_last_motor_update = u32_now;
+        motor_control_update(&s_motor_cmd);
+    }
 
-        /* Read BMP280 */
-        int16_t s16_bmp_t;
-        uint16_t u16_bmp_p;
-        if (bmp280_test_read_temp_press(&s16_bmp_t, &u16_bmp_p) == 0) {
-            uart_debug_printf("[BMP280] %.1f C / %u hPa\r\n",
-                              (float)s16_bmp_t / 10.0f, u16_bmp_p);
-        }
+    /* --- 2. Status print (every 2 seconds) --- */
+    if ((u32_now - u32_last_status_print) >= 2000U) {
+        u32_last_status_print = u32_now;
 
+        const motor_sensor_data_t *ps_sensor = motor_get_sensor_data();
+        uart_debug_printf("--- Status ---\r\n");
+        uart_debug_printf("  State: %d | PWM: %d%% | Mode: %s\r\n",
+                          motor_get_state(), motor_get_pwm(),
+                          (s_motor_cmd.e_mode == MOTOR_MODE_MANUAL) ? "MANUAL" : "AUTO");
+        uart_debug_printf("  Temp: %.1f°C | Current: %dmA | Voltage: %dmV\r\n",
+                          (float)ps_sensor->s16_lm35_temp_c10 / 10.0f,
+                          ps_sensor->s16_current_ma,
+                          ps_sensor->u16_voltage_mv);
+        uart_debug_printf("  Alarm: 0x%04X | Fault: %d | Errors: 0x%02X\r\n",
+                          motor_get_alarm_flags(),
+                          motor_get_fault_code(),
+                          ps_sensor->u8_sensor_errors);
         uart_debug_printf("---\r\n");
+    }
 
-        /* Toggle LED as heartbeat */
-        gpio_set_led(1U);
-        HAL_Delay(50);
-        gpio_set_led(0U);
+    /* --- 3. Watchdog feed (every 1 second) --- */
+    if ((u32_now - u32_last_watchdog_feed) >= 1000U) {
+        u32_last_watchdog_feed = u32_now;
+        /* HAL_IWDG_Refresh(&hiwdg);  // Uncomment when IWDG is enabled */
+    }
+
+    /* --- 4. UART command parser (non-blocking) --- */
+    if (HAL_UART_Receive(&huart1, &u8_rx_byte, 1U, 0U) == HAL_OK) {
+        switch (u8_rx_byte) {
+            case 'S':   /* Start motor */
+            case 's':
+                s_motor_cmd.u8_enable = 1U;
+                s_motor_cmd.u8_pwm_setpoint = 50U;  /* Default 50% */
+                uart_debug_printf("[CMD] Motor START (50%%)\r\n");
+                break;
+
+            case 'X':   /* Stop motor */
+            case 'x':
+                s_motor_cmd.u8_enable = 0U;
+                s_motor_cmd.u8_pwm_setpoint = 0U;
+                uart_debug_printf("[CMD] Motor STOP\r\n");
+                break;
+
+            case 'R':   /* Reset fault */
+            case 'r':
+                s_motor_cmd.u8_reset_fault = 1U;
+                uart_debug_printf("[CMD] Reset fault\r\n");
+                HAL_Delay(100U);
+                s_motor_cmd.u8_reset_fault = 0U;
+                break;
+
+            case '0':   /* 100% PWM */
+                s_motor_cmd.u8_pwm_setpoint = 100U;
+                uart_debug_printf("[CMD] PWM = 100%%\r\n");
+                break;
+
+            case '1':   /* 10% PWM */
+            case '2':   /* 20% */
+            case '3':   /* 30% */
+            case '4':   /* 40% */
+            case '5':   /* 50% */
+            case '6':   /* 60% */
+            case '7':   /* 70% */
+            case '8':   /* 80% */
+            case '9':   /* 90% */
+                s_motor_cmd.u8_pwm_setpoint = (u8_rx_byte - '0') * 10U;
+                uart_debug_printf("[CMD] PWM = %d%%\r\n", s_motor_cmd.u8_pwm_setpoint);
+                break;
+
+            case 'A':   /* Auto mode */
+            case 'a':
+                s_motor_cmd.e_mode = MOTOR_MODE_AUTO;
+                s_motor_cmd.u8_enable = 1U;
+                uart_debug_printf("[CMD] Mode -> AUTO\r\n");
+                break;
+
+            case 'M':   /* Manual mode */
+            case 'm':
+                s_motor_cmd.e_mode = MOTOR_MODE_MANUAL;
+                uart_debug_printf("[CMD] Mode -> MANUAL\r\n");
+                break;
+
+            default:
+                uart_debug_printf("[CMD] Unknown: '%c' (0x%02X)\r\n",
+                                  (char)u8_rx_byte, u8_rx_byte);
+                break;
+        }
     }
   }
   /* USER CODE END 3 */
