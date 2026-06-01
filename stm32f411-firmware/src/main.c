@@ -27,6 +27,7 @@
 #include "sensors/bmp280_test.h"
 #include "motor/motor_control.h"
 #include "fault/fault_manager.h"
+#include "config/config.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -49,9 +50,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static volatile uint32_t gu32_test_pass = 0U;
-static volatile uint32_t gu32_test_fail = 0U;
-static volatile uint32_t gu32_systick_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,44 +60,6 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-/**
- * @brief  Increment millisecond counter (called from SysTick)
- */
-void HAL_SYSTICK_Callback(void)
-{
-    gu32_systick_ms++;
-}
-
-/**
- * @brief  Get elapsed milliseconds since boot
- */
-static uint32_t test_get_ms(void)
-{
-    return gu32_systick_ms;
-}
-
-/**
- * @brief  Print test result line
- */
-static void test_result(const char *pc_name, int s32_result)
-{
-    if (s32_result == 0) {
-        uart_debug_printf("  [PASS] %s\r\n", pc_name);
-        gu32_test_pass++;
-    } else {
-        uart_debug_printf("  [FAIL] %s (error=%d)\r\n", pc_name, s32_result);
-        gu32_test_fail++;
-    }
-}
-
-/**
- * @brief  Print section header
- */
-static void test_section(const char *pc_section)
-{
-    uart_debug_printf("\r\n--- %s ---\r\n", pc_section);
-}
 
 /* USER CODE END 0 */
 
@@ -164,6 +124,44 @@ int main(void)
       Error_Handler();
   }
 
+  /* ========================================================================
+   * DIAGNOSTIC: Verify TIM1 PWM registers
+   * ======================================================================== */
+  uart_debug_printf("\r\n[DIAG] TIM1 Register Check:\r\n");
+  uart_debug_printf("  CR1  = 0x%04lX (bit0 CEN=timer enable)\r\n",
+                    (unsigned long)htim1.Instance->CR1);
+  uart_debug_printf("  CCER = 0x%04lX (bit0 CC1E=ch1 output enable)\r\n",
+                    (unsigned long)htim1.Instance->CCER);
+  uart_debug_printf("  BDTR = 0x%04lX (bit15 MOE=main output enable)\r\n",
+                    (unsigned long)htim1.Instance->BDTR);
+  uart_debug_printf("  CNT  = %lu\r\n", (unsigned long)htim1.Instance->CNT);
+  uart_debug_printf("  CCR1 = %lu (compare value)\r\n",
+                    (unsigned long)htim1.Instance->CCR1);
+  uart_debug_printf("  ARR  = %lu (auto-reload = period)\r\n",
+                    (unsigned long)htim1.Instance->ARR);
+
+  /* Check critical bits */
+  uint32_t u32_cr1 = htim1.Instance->CR1;
+  uint32_t u32_ccer = htim1.Instance->CCER;
+  uint32_t u32_bdtr = htim1.Instance->BDTR;
+
+  if ((u32_cr1 & 0x01U) == 0U) {
+      uart_debug_printf("  [WARN] TIM1 not running! CR1.CEN=0\r\n");
+  }
+  if ((u32_ccer & 0x01U) == 0U) {
+      uart_debug_printf("  [WARN] CH1 output not enabled! CCER.CC1E=0\r\n");
+  }
+  if ((u32_bdtr & 0x8000U) == 0U) {
+      uart_debug_printf("  [WARN] Main output disabled! BDTR.MOE=0\r\n");
+  }
+
+  /* Also read GPIO config for PA8 */
+  uart_debug_printf("  PA8 MODER = 0x%04lX (should be 0x02 = AF mode)\r\n",
+                    (unsigned long)((GPIOA->MODER >> (8U * 2U)) & 0x03U));
+  uart_debug_printf("  PA8 AFR[1] = 0x%01lX (should be 0x1 = AF1)\r\n",
+                    (unsigned long)((GPIOA->AFR[1U] >> (0U * 4U)) & 0x0FU));
+  uart_debug_printf("\r\n");
+
   /* Start with motor stopped, manual mode, default thresholds */
   motor_command_t s_motor_cmd;
   s_motor_cmd.u8_enable         = 0U;
@@ -206,7 +204,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    uint32_t u32_now = test_get_ms();
+    uint32_t u32_now = HAL_GetTick();
 
     /* --- 1. Motor control update (every 100ms) --- */
     if ((u32_now - u32_last_motor_update) >= 100U) {
@@ -234,9 +232,11 @@ int main(void)
         uart_debug_printf("---\r\n");
     }
 
-    /* --- 3. Watchdog feed (every 1 second) --- */
+    /* --- 3. Watchdog feed + fault recovery (every 1 second) --- */
     if ((u32_now - u32_last_watchdog_feed) >= 1000U) {
         u32_last_watchdog_feed = u32_now;
+        /* BUG FIX: Call fault_manager_update for auto-recovery */
+        fault_manager_update(u32_now);
         /* HAL_IWDG_Refresh(&hiwdg);  // Uncomment when IWDG is enabled */
     }
 
@@ -294,6 +294,24 @@ int main(void)
             case 'm':
                 s_motor_cmd.e_mode = MOTOR_MODE_MANUAL;
                 uart_debug_printf("[CMD] Mode -> MANUAL\r\n");
+                break;
+
+            /* === DIAGNOSTIC: Direct PWM test bypassing state machine === */
+            case 'T':   /* Test PWM directly at 100% - bypass FSM */
+            case 't':
+                uart_debug_printf("[DIAG] Direct PWM test: 100%%\r\n");
+                __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 99U);
+                uart_debug_printf("[DIAG] Compare set to 99. PA8 should be HIGH\r\n");
+                uart_debug_printf("[DIAG] TIM1 BDTR=0x%04lX CR1=0x%04lX CCER=0x%04lX\r\n",
+                                  (unsigned long)htim1.Instance->BDTR,
+                                  (unsigned long)htim1.Instance->CR1,
+                                  (unsigned long)htim1.Instance->CCER);
+                break;
+
+            case 'Y':   /* Stop PWM test - set 0% */
+            case 'y':
+                uart_debug_printf("[DIAG] Direct PWM test: 0%%\r\n");
+                __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
                 break;
 
             default:
