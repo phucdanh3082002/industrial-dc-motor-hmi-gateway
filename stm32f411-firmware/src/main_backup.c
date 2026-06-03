@@ -65,7 +65,7 @@ void vApplicationMallocFailedHook(void)
 
 /**
  * @brief Tick hook - called every FreeRTOS tick (1ms)
- * SysTick_Handler (from FreeRTOS port.c) calls this after xTaskIncrementTick()
+ * Used to call HAL_IncTick() for HAL_Delay() compatibility
  */
 void vApplicationTickHook(void)
 {

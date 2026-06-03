@@ -1,12 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
 
-#
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
-#
-# User is free to modify the file as much as necessary
-#
-
 # Setup compiler settings
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -43,7 +36,26 @@ add_executable(${CMAKE_PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 
 # ============================================================================
-# User custom sources (drivers, sensors, motor, modbus, etc.)
+# FreeRTOS kernel sources
+# ============================================================================
+set(FREERTOS_KERNEL_DIR ${CMAKE_SOURCE_DIR}/Middlewares/FreeRTOS/Kernel)
+
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    # FreeRTOS kernel
+    ${FREERTOS_KERNEL_DIR}/tasks.c
+    ${FREERTOS_KERNEL_DIR}/queue.c
+    ${FREERTOS_KERNEL_DIR}/list.c
+    ${FREERTOS_KERNEL_DIR}/timers.c
+    ${FREERTOS_KERNEL_DIR}/event_groups.c
+    ${FREERTOS_KERNEL_DIR}/stream_buffer.c
+
+    # FreeRTOS portable (Cortex-M4F, heap_4)
+    ${FREERTOS_KERNEL_DIR}/portable/GCC/ARM_CM4F/port.c
+    ${FREERTOS_KERNEL_DIR}/portable/MemMang/heap_4.c
+)
+
+# ============================================================================
+# User custom sources (drivers, sensors, motor, freertos tasks, etc.)
 # ============================================================================
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Driver layer
@@ -60,12 +72,16 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Motor control & fault management (Phase 2)
     src/motor/motor_control.c
     src/fault/fault_manager.c
+
+    # FreeRTOS tasks
+    src/freertos/freertos_tasks.c
 )
 
 # ============================================================================
-# User include paths
+# Include paths
 # ============================================================================
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    # User code
     src
     src/config
     src/drivers
@@ -74,6 +90,13 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     src/motor
     src/fault
     src/freertos
+
+    # FreeRTOS
+    ${FREERTOS_KERNEL_DIR}/include
+    ${FREERTOS_KERNEL_DIR}/portable/GCC/ARM_CM4F
+
+    # Inc (for FreeRTOSConfig.h)
+    Inc
 )
 
 # ============================================================================

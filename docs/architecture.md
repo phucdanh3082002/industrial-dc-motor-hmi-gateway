@@ -59,20 +59,23 @@ Raspberry Pi logs data, hosts dashboard, manages training data
 
 ### STM32F411 - Field Control Node
 - **Primary responsibility**: Embedded firmware core
+- **API Strategy**: STM32 HAL + Low-Level (LL) hybrid (~70% HAL, ~30% LL)
 - **Functions**:
-  - Read LM35 via ADC
-  - Read INA219 via I2C
-  - Read BMP280 via I2C
-  - Control DC motor via PWM (MOSFET)
-  - Drive buzzer and LED
-  - Handle over-current protection
+  - Read LM35 via ADC (LL + DMA for 16-sample averaging)
+  - Read INA219 via I2C (HAL with LL bus recovery)
+  - Read BMP280 via I2C (HAL with LL bus recovery)
+  - Control DC motor via PWM (MOSFET) using `__HAL_TIM_SET_COMPARE` (LL macro)
+  - Emergency motor shutdown via ADC watchdog ISR (< 10µs, direct register access)
+  - Drive buzzer and LED (HAL GPIO)
+  - Handle over-current protection (LL ISR for immediate response)
   - Handle over-temperature protection
   - Detect sensor errors
-  - Implement motor state machine
+  - Implement motor state machine (Pure C logic)
   - Maintain Modbus register map
-  - Act as Modbus RTU Slave (RS-485)
+  - Act as Modbus RTU Slave (RS-485) via LL UART ISR for T3.5 timing
+  - RS-485 direction control via LL inline GPIO (TX/RX switching)
   - Accept commands from ESP32 (start, stop, set speed, reset alarm, switch mode)
-  - Use watchdog for system reliability
+  - Use watchdog for system reliability (HAL IWDG)
 
 ### ESP32-WROOM-32 - HMI Gateway & TinyML Engine
 - **Primary responsibility**: Gateway between field node and server
@@ -255,6 +258,57 @@ Raspberry Pi logs data, hosts dashboard, manages training data
 - MQTT broker reconnection with backoff
 - Modbus slave timeout/retry handling
 - Graceful degradation (local operation if server unavailable)
+
+---
+
+## STM32 Low-Level Optimization Map
+
+Dự án sử dụng chiến lược **LL/HAL hybrid** trên STM32F411 để cân bằng giữa khả năng bảo trì và hiệu năng thời gian thực.
+
+### Bảng Phân Bổ API
+
+| Module | API | Tầng | Lý Do |
+|--------|-----|-------|-------|
+| System Clock Config | HAL | `main.c` | Chạy 1 lần khi boot |
+| GPIO Init (LED, Buzzer) | HAL | `gpio.c` | Khởi tạo 1 lần |
+| I2C Sensor Read | HAL | `i2c_driver.c` | 100ms interval, không cần tối ưu |
+| I2C Bus Recovery | **LL** | `i2c_driver.c` | Bit-bang SCL 9 clock pulse khi bus treo |
+| ADC Sampling (LM35) | **LL + DMA** | `adc_driver.c` | 16-sample averaging, DMA tự động, không blocking |
+| PWM Control | `__HAL_TIM_SET_COMPARE` | `motor_control.c` | Macro LL truy cập TIMx->CCR1 trực tiếp |
+| Emergency PWM Kill | **LL (ISR)** | `emergency_stop.c` | < 10µs response, ghi trực tiếp TIM1->BDTR |
+| Modbus UART2 RX | **LL (ISR)** | `modbus_slave.c` | T3.5 timing critical, đọc USART2->DR trực tiếp |
+| RS-485 Direction | **LL inline** | `gpio_driver.c` | Đổi TX/RX trước mỗi byte Modbus |
+| Debug UART1 | HAL | `uart_debug.c` | Debug không cần tốc độ |
+| Watchdog Feed | HAL | `watchdog_task.c` | 1 lần/giây |
+| Motor FSM Logic | Pure C | `motor_control.c` | Logic thuần, không liên quan HW |
+| Fault Manager | Pure C | `fault_manager.c` | Logic thuần, escalation rules |
+
+### Emergency Stop Mechanism
+
+Motor shutdown khẩn cấp sử dụng **ADC Analog Watchdog** ở tầng phần cứng:
+
+```
+ADC Sample > Current Threshold
+    → Hardware trigger ADC_IRQHandler (ISR)
+    → TIM1->BDTR &= ~TIM_BDTR_MOE (tắt PWM output ngay lập tức)
+    → Buzzer ON
+    → Set flag cho motor_task xử lý ở mức software
+    
+Thời gian phản hồi: < 10µs (từ lúc ADC sample đến lúc PWM tắt)
+So với HAL path: motor_task (100ms cycle) → quá chậm cho safety-critical
+```
+
+### Modbus UART ISR
+
+Nhận byte Modbus RTU trực tiếp từ thanh ghi DR để đảm bảo timing T3.5:
+
+```
+USART2 byte received → USART2_IRQHandler (ISR)
+    → LL_USART_ReceiveData8(USART2) → modbus_rx_buffer[]
+    → Timestamp cho T3.5 detection
+    
+Tốc độ: ~5-8 cycle/byte (so với HAL: ~40-60 cycle/byte)
+```
 
 ---
 

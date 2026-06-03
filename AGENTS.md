@@ -547,6 +547,98 @@ def publish_telemetry(client: mqtt.Client, topic: str, payload: dict) -> bool:
 
 ---
 
+## STM32 LL/HAL Hybrid Strategy
+
+Dự án sử dụng **chiến lược kết hợp STM32 HAL và Low-Level (LL) API** trên STM32F411. Đây là quyết định kiến trúc quan trọng, đảm bảo cả **khả năng bảo trì** lẫn **hiệu năng thời gian thực**.
+
+### Nguyên Tắc Chung
+
+- **~70% code** dùng HAL: Khởi tạo hệ thống, I2C sensor, UART debug, PWM start/stop, watchdog
+- **~30% code** dùng LL/Registers: ADC DMA, Modbus UART ISR, emergency motor shutdown, RS-485 direction control
+- **Không bao giờ** trộn lẫn LL và HAL trong cùng một hàm trừ khi có lý do rõ ràng
+- Luôn **gói gọn** code LL vào tầng Driver, không để xuất hiện ở tầng Application
+
+### Bảng Quyết Định: Module Nào Dùng Gì
+
+| Module | File | API | Lý Do |
+|--------|------|-----|-------|
+| System Clock | `main.c` | HAL | Chạy 1 lần khi boot |
+| GPIO Init | `gpio.c` | HAL | Khởi tạo 1 lần |
+| I2C Sensor Read | `i2c_driver.c` | HAL | 100ms interval, không cần tối ưu |
+| I2C Bus Recovery | `i2c_driver.c` | **LL** | Bit-bang SCL khi bus treo |
+| ADC Sampling | `adc_driver.c` | **LL + DMA** | 16-sample averaging, DMA tự động |
+| PWM Control | `motor_control.c` | `__HAL_TIM_SET_COMPARE` | Đã là macro LL |
+| Emergency PWM Kill | `emergency_stop.c` | **LL (ISR)** | < 10µs response, thanh ghi trực tiếp |
+| Modbus UART2 RX | `modbus_slave.c` | **LL (ISR)** | T3.5 timing critical |
+| RS-485 Direction | `gpio_driver.c` | **LL inline** | Đổi TX/RX trước mỗi byte |
+| Debug UART1 | `uart_debug.c` | HAL | Debug không cần tốc độ |
+| Watchdog Feed | `watchdog_task.c` | HAL | 1 lần/giây |
+| Motor FSM Logic | `motor_control.c` | Pure C | Logic thuần, không liên quan HW |
+| Fault Manager | `fault_manager.c` | Pure C | Logic thuần |
+
+### Ví Dụ: Emergency Motor Stop (LL ISR)
+
+```c
+// Khi dòng điện vượt ngưỡng nguy hiểm, motor phải dừng trong < 10µs
+void ADC_IRQHandler(void)
+{
+    if (LL_ADC_IsActiveFlag_AWD1(ADC1)) {
+        LL_ADC_ClearFlag_AWD1(ADC1);
+        TIM1->BDTR &= ~TIM_BDTR_MOE;  // Tắt PWM ngay lập tức
+        LL_GPIO_SetOutputPin(BUZZER_PORT, BUZZER_PIN);  // Buzzer ON
+    }
+}
+```
+
+### Ví Dụ: Modbus UART2 ISR (LL)
+
+```c
+// Nhận byte trực tiếp từ thanh ghi DR, không qua HAL overhead
+void USART2_IRQHandler(void)
+{
+    if (LL_USART_IsActiveFlag_RXNE(USART2)) {
+        uint8_t byte = (uint8_t)LL_USART_ReceiveData8(USART2);
+        modbus_rx_buffer[modbus_rx_idx++] = byte;
+        last_rx_tick = HAL_GetTick();
+    }
+    if (LL_USART_IsActiveFlag_ORE(USART2)) {
+        LL_USART_ClearFlag_ORE(USART2);
+    }
+}
+```
+
+### Ví Dụ: ADC DMA Continuous Conversion (LL)
+
+```c
+// ADC đọc liên tục, DMA tự động lưu kết quả → CPU không phải chờ
+void adc_driver_init_dma(void)
+{
+    LL_ADC_SetResolution(ADC1, LL_ADC_RESOLUTION_12B);
+    LL_ADC_SetDataAlignment(ADC1, LL_ADC_DATA_ALIGN_RIGHT);
+    LL_ADC_REG_SetTriggerSource(ADC1, LL_ADC_REG_TRIG_SOFTWARE);
+    LL_ADC_REG_SetDMATransfer(ADC1, LL_ADC_REG_DMA_TRANSFER_UNLIMITED);
+    LL_ADC_Enable(ADC1);
+    LL_ADC_StartCalibration(ADC1);
+}
+```
+
+### Quy Tắc Khi Viết Code LL
+
+1. **Đóng gói**: Tất cả code LL phải nằm trong tầng `drivers/`, không để ở `motor/`, `fault/`, hay `freertos/`
+2. **Comment rõ ràng**: Mỗi đoạn code LL phải có comment giải thích **tại sao** dùng LL thay vì HAL
+3. **Inline functions**: Sử dụng `static inline` cho các hàm LL nhỏ (GPIO toggle, RS-485 dir)
+4. **Header tách biệt**: Tạo header riêng cho mỗi module LL (`adc_driver_ll.h`, `uart_modbus_ll.h`)
+5. **Fallback**: Nếu LL không khả dụng trên platform khác, cung cấp phiên bản HAL dự phòng
+
+### Tài Liệu Tham Khảo
+
+- `docs/architecture.md` - Phần "STM32 Low-Level Optimization Map"
+- `docs/motor-control-design.md` - Phần "Emergency Stop Mechanism"
+- `docs/phase2-progress.md` - Phần "LL Optimization Plan for Phase 3+"
+- `docs/hardware-pinout.md` - Ghi chú LL cho từng pin
+
+---
+
 ## Build Commands
 
 ### STM32 Firmware

@@ -329,6 +329,99 @@ PWM Duty | Approximate Speed | Current Typical |
 
 ---
 
+### Emergency Stop Mechanism (LL - Hardware-Level)
+
+**Purpose**: Motor shutdown trong **< 10µs** khi phát hiện điều kiện nguy hiểm, không phụ thuộc vào software task cycle.
+
+**Tại sao cần LL**: Motor task chạy mỗi 100ms. Nếu dòng điện vượt ngưỡng nguy hiểm, chờ 100ms để xử lý quá chậm → MOSFET hoặc motor có thể bị hư. ADC Analog Watchdog trigger ngay lập tức ở tầng phần cứng.
+
+**Implementation**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  HARDWARE PATH (LL - < 10µs)                                │
+│  ADC samples PA0 (LM35) liên tục qua DMA                    │
+│       ↓                                                     │
+│  ADC Analog Watchdog so sánh với ngưỡng dòng điện          │
+│       ↓ (vượt ngưỡng)                                      │
+│  ADC_IRQHandler (ISR) - chạy ngay lập tức                   │
+│       ↓                                                     │
+│  TIM1->BDTR &= ~TIM_BDTR_MOE  → Tắt tất cả PWM outputs    │
+│  LL_GPIO_SetOutputPin(BUZZER) → Buzzer ON                   │
+│  Set g_u8_emergency_stop_flag → Báo cho motor_task          │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  SOFTWARE PATH (HAL - ~100ms)                               │
+│  motor_task nhận emergency flag                             │
+│       ↓                                                     │
+│  Cập nhật motor state → FAULT                               │
+│  Ghi fault code vào register 40010                          │
+│  Publish alarm qua MQTT                                     │
+│  Log sự kiện vào UART debug                                 │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Code Implementation**:
+
+```c
+// File: src/drivers/emergency_stop.c
+// Sử dụng LL API cho tốc độ phản hồi < 10µs
+
+/**
+ * @brief ADC Analog Watchdog callback - Emergency motor shutdown
+ * 
+ * Được cấu hình phần cứng: khi ADC value > ngưỡng overcurrent,
+ * hardware tự động trigger ADC_IRQHandler.
+ * 
+ * Tại sao dùng LL: Phản ứng phải < 10µs. HAL_ADC_IRQHandler quá chậm
+ * (kiểm tra hàng chục cờ trạng thái). LL truy cập trực tiếp thanh ghi.
+ */
+void ADC_IRQHandler(void)
+{
+    if (LL_ADC_IsActiveFlag_AWD1(ADC1))
+    {
+        LL_ADC_ClearFlag_AWD1(ADC1);
+        
+        // Tắt PWM NGAY LẬP TỨC bằng thanh ghi
+        // TIM_BDTR MOE (Main Output Enable) = 0 → tất cả PWM outputs disabled
+        TIM1->BDTR &= ~TIM_BDTR_MOE;
+        
+        // Bật buzzer ngay (LL inline, ~2 cycle)
+        LL_GPIO_SetOutputPin(BUZZER_PORT, BUZZER_PIN);
+        
+        // Set flag cho motor_task xử lý ở mức software
+        extern volatile uint8_t g_u8_emergency_stop_flag;
+        g_u8_emergency_stop_flag = 1U;
+    }
+}
+```
+
+**Cấu hình ADC Watchdog**:
+
+```c
+// Thiết lập Analog Watchdog trên ADC channel đo dòng điện (INA219 qua ADC)
+// Ngưỡng: tương ứng với current_threshold (register 40104)
+LL_ADC_SetAnalogWatchdogThresholds(ADC1, LL_ADC_AWD1, 
+                                    current_threshold_adc_value, 0);
+LL_ADC_SetAnalogWatchdogSingleChannel(ADC1, LL_ADC_AWD_CHANNEL);
+LL_ADC_EnableIT_AWD1(ADC1);
+```
+
+**Response Timeline**:
+
+| Event | Time | Path |
+|-------|------|------|
+| ADC sample vượt ngưỡng | 0µs | Hardware |
+| ADC_IRQHandler chạy | ~1-2µs | ISR (LL) |
+| TIM1 PWM tắt (MOE=0) | ~2-3µs | Register write |
+| Buzzer ON | ~3-4µs | GPIO set |
+| **Tổng thời gian** | **< 10µs** | **Hardware + ISR** |
+| motor_task nhận flag | ~100ms | Software (FreeRTOS) |
+| MQTT alarm publish | ~1-2s | Network |
+
+---
+
 ### Sensor Error Handling
 
 **LM35 Error Conditions**:
